@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>라온시큐어 추세 추종 전략 시각화</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+    <style>
+        body { font-family: sans-serif; padding: 2em; }
+        #chartContainer { width: 100%; height: 500px; }
+        #error { color: red; margin-top: 10px; white-space: pre-line; }
+    </style>
+</head>
+<body>
+    <h2>📈 추세 추종 전략 시각화</h2>
+    <p>CSV 파일을 업로드하면 이동평균선과 매수/매도 시점을 시각화합니다.</p>
+    <input type="file" id="fileInput" accept=".csv">
+    <div id="error"></div>
+    <canvas id="stockChart"></canvas>
+
+    <script>
+        const ctx = document.getElementById('stockChart').getContext('2d');
+        const fileInput = document.getElementById('fileInput');
+        const errorDiv = document.getElementById('error');
+        let chart;
+
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            errorDiv.textContent = '📄 파일 업로드 완료: ' + file.name;
+            Papa.parse(file, {
+                header: false,
+                skipEmptyLines: true,
+                complete: (results) => {
+                    const rows = results.data;
+                    if (rows.length < 2) {
+                        errorDiv.textContent += '❗ 유효한 데이터가 포함되어야 합니다.';
+                        return;
+                    }
+                    const data = rows.map(row => ({ 일자: row[0], 종가: row[1] })).filter(row => row.일자 && !isNaN(parseFloat(row.종가)));
+                    if (!data.length) {
+                        errorDiv.textContent += '❗ 데이터가 비어 있거나 유효하지 않습니다.';
+                        return;
+                    }
+                    visualize(data);
+                },
+                error: (err) => {
+                    errorDiv.textContent = 'CSV 파일 파싱 오류: ' + err.message;
+                }
+            });
+        });
+
+        function visualize(data) {
+            const analysisDiv = document.createElement('div');
+            analysisDiv.style.marginTop = '20px';
+            document.body.appendChild(analysisDiv);
+            const labels = data.map(row => row['일자']).reverse();
+            const closePrices = data.map(row => parseFloat(row['종가'])).reverse();
+
+            function calcSMA(prices, period) {
+                return prices.map((_, i, arr) => {
+                    if (i < period - 1) return null;
+                    const slice = arr.slice(i - period + 1, i + 1);
+                    return slice.reduce((a, b) => a + b, 0) / period;
+                });
+            }
+
+            const sma10 = calcSMA(closePrices, 10);
+            const sma40 = calcSMA(closePrices, 40);
+
+            const buySignals = [];
+            const sellSignals = [];
+            for (let i = 1; i < data.length; i++) {
+                if (sma10[i] !== null && sma40[i] !== null) {
+                    if (sma10[i] > sma40[i] && sma10[i - 1] <= sma40[i - 1]) {
+                        buySignals.push({ x: labels[i], y: closePrices[i] });
+                    } else if (sma10[i] < sma40[i] && sma10[i - 1] >= sma40[i - 1]) {
+                        sellSignals.push({ x: labels[i], y: closePrices[i] });
+                    }
+                }
+            }
+
+            if (chart) chart.destroy();
+
+            // 수익률 및 보유기간 분석
+            const trades = [];
+            let position = null;
+            for (let i = 0; i < labels.length; i++) {
+                const date = labels[i];
+                const price = closePrices[i];
+                if (buySignals.some(p => p.x === date)) {
+                    position = { buyDate: date, buyPrice: price, buyIndex: i };
+                }
+                if (position && sellSignals.some(p => p.x === date)) {
+                    const profit = price - position.buyPrice;
+                    const returnRate = ((price - position.buyPrice) / position.buyPrice) * 100;
+                    const holdDays = i - position.buyIndex;
+                    trades.push({ ...position, sellDate: date, sellPrice: price, profit, returnRate, holdDays });
+                    position = null;
+                }
+            }
+
+            const totalTrades = trades.length;
+            const avgHold = (trades.reduce((acc, t) => acc + t.holdDays, 0) / totalTrades || 0).toFixed(1);
+            const avgReturn = (trades.reduce((acc, t) => acc + t.returnRate, 0) / totalTrades || 0).toFixed(2);
+
+            analysisDiv.innerHTML = `
+              <h3>📊 전략 분석 결과</h3>
+              <p>총 거래 횟수: <strong>${totalTrades}</strong></p>
+              <p>평균 보유 기간: <strong>${avgHold}일</strong></p>
+              <p>평균 수익률: <strong>${avgReturn}%</strong></p>
+              <table border="1" cellpadding="5" style="border-collapse:collapse; margin-top:10px">
+                <thead>
+                  <tr><th>매수일</th><th>매도가</th><th>수익(원)</th><th>수익률(%)</th><th>보유일</th></tr>
+                </thead>
+                <tbody>
+                  ${trades.map(t => `<tr>
+                    <td>${t.buyDate}</td>
+                    <td>${t.sellPrice}</td>
+                    <td>${t.profit.toFixed(0)}</td>
+                    <td>${t.returnRate.toFixed(2)}</td>
+                    <td>${t.holdDays}</td>
+                  </tr>`).join('')}
+                </tbody>
+              </table>
+            `;
+
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets: [
+                        {
+                            label: '종가',
+                            data: closePrices,
+                            borderColor: 'blue',
+                            fill: false,
+                            tension: 0.1
+                        },
+                        {
+                            label: 'SMA10',
+                            data: sma10,
+                            borderColor: 'green',
+                            fill: false,
+                            tension: 0.1
+                        },
+                        {
+                            label: 'SMA40',
+                            data: sma40,
+                            borderColor: 'red',
+                            fill: false,
+                            tension: 0.1
+                        },
+                        {
+                            type: 'scatter',
+                            label: '매수 시점',
+                            data: buySignals,
+                            backgroundColor: 'green',
+                            pointStyle: 'triangle',
+                            radius: 12
+                        },
+                        {
+                            type: 'scatter',
+                            label: '매도 시점',
+                            data: sellSignals,
+                            backgroundColor: 'red',
+                            pointStyle: 'rectRot',
+                            radius: 12
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        x: { display: true, title: { display: true, text: '일자' } },
+                        y: { display: true, title: { display: true, text: '가격' } }
+                    },
+                    plugins: {
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false
+                        },
+                        title: {
+                            display: true,
+                            text: '라온시큐어 추세 추종 전략 매매 시점'
+                        }
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>
